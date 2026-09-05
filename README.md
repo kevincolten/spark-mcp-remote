@@ -76,6 +76,28 @@ It shows up on mobile too. Install `Spark.skill` from the Readdle releases page 
 
 ## Keep it running (macOS)
 
+Two options. Both must run **as your user**, never as root — the Spark CLI talks to the Spark Desktop GUI session.
+
+### Option A: supervisord (web UI, recommended)
+
+Gives you a local start/stop/restart/tail-logs dashboard for this and any other bare-metal services on the Mac. No containers, no cloud.
+
+```bash
+brew install supervisor
+mkdir -p $(brew --prefix)/etc/supervisor.d
+cp supervisor/spark-mcp-remote.ini supervisor/cloudflared.ini $(brew --prefix)/etc/supervisor.d/
+# edit YOU / paths in both .ini files
+# merge supervisor/supervisord.conf into $(brew --prefix)/etc/supervisord.conf (inet_http_server + include)
+brew services start supervisor       # user-level launchd agent, survives reboots
+supervisorctl status
+```
+
+UI is at `http://<tailscale-ip>:9001`. Bind it to your Tailscale IP, not `0.0.0.0`; the bearer token protects `/mcp`, but the supervisor UI can restart things and read logs.
+
+Intel Macs: replace `/opt/homebrew` with `/usr/local` in the ini files.
+
+### Option B: launchd directly
+
 ```bash
 cp launchd/com.kevincolten.spark-mcp-remote.plist ~/Library/LaunchAgents/
 # edit WorkingDirectory + node path in the plist
