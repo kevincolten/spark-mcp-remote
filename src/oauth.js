@@ -14,6 +14,10 @@
  * credential: the /authorize consent screen asks for it, and proving you know
  * it is what authorizes the client.
  *
+ * Access to /mcp is OAuth-only. The shared secret is never accepted as a
+ * bearer token directly; it authorizes the consent screen and signs what the
+ * server issues, nothing more.
+ *
  * Everything is stateless — client registrations, authorization codes and
  * tokens are all HMAC-signed blobs keyed by SPARK_MCP_TOKEN, verified on
  * presentation. Nothing is persisted, which matters because supervisord
@@ -223,11 +227,17 @@ export function createOAuth({ secret, mcpPath, publicUrl }) {
         return a.length === secretBuf.length && timingSafeEqual(a, secretBuf);
     };
 
-    /** Validate a bearer credential presented to the MCP endpoint. */
+    /**
+     * Validate a bearer credential presented to the MCP endpoint.
+     *
+     * Only tokens this server issued are accepted. SPARK_MCP_TOKEN is the
+     * consent credential and the signing key — presenting it directly as a
+     * bearer does NOT authenticate. That keeps the long-lived secret off the
+     * wire on every request: what travels is a short-lived, audience-bound
+     * access token that expires in an hour and can be revoked by rotating the
+     * secret.
+     */
     const verifyAccess = (presented, origin) => {
-        // Back-compat: the raw shared secret still works, so curl, Claude Code
-        // --header and mcp-remote keep working exactly as before.
-        if (checkToken(presented)) return { sub: "static", scope: "spark" };
         const claims = verify(secret, "access", presented);
         if (!claims) return null;
         // Audience binding (RFC 8707): only accept tokens minted for us.

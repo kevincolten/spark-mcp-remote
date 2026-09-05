@@ -4,7 +4,7 @@
  *
  * Wraps the official Spark for Claude MCP server (readdle/spark-claude-extension,
  * a stdio server that shells out to the Spark CLI) and exposes it over MCP
- * Streamable HTTP with bearer-token auth.
+ * Streamable HTTP, authenticated with OAuth 2.1 (see src/oauth.js).
  *
  * Runs on the same Mac/PC as Spark Desktop. Put it behind a Cloudflare Tunnel or
  * Tailscale Funnel and add the URL as a custom connector in Claude.ai / Claude
@@ -197,8 +197,9 @@ function buildDownstream() {
 const sessions = new Map(); // sessionId -> { transport, server }
 
 // Claude.ai can only authenticate a connector over OAuth, so the bridge is its
-// own authorization server (see src/oauth.js). The raw SPARK_MCP_TOKEN still
-// works as a bearer for curl / Claude Code / mcp-remote.
+// own authorization server (see src/oauth.js). Only tokens it issued are
+// accepted here — SPARK_MCP_TOKEN authorizes the consent screen and signs the
+// tokens, but is not itself a valid bearer.
 const oauth = createOAuth({ secret: TOKEN, mcpPath: MCP_PATH, publicUrl: PUBLIC_URL });
 
 function authorized(req, origin) {

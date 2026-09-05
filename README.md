@@ -4,13 +4,13 @@ Reach your [Spark](https://sparkmailapp.com) mailbox from Claude on your phone /
 
 Spark's official [Spark for Claude](https://github.com/readdle/spark-claude-extension) is a **stdio** MCP server that shells out to the Spark CLI, which only exists where Spark Desktop is running (macOS/Windows). That's fine for Claude Desktop, invisible to Claude mobile and claude.ai.
 
-This is a ~200-line bridge that spawns Readdle's server as a child process and exposes it over **MCP Streamable HTTP** with bearer-token auth. Run it on the Mac next to Spark, tunnel it out, add the URL as a custom connector, done.
+This is a small bridge that spawns Readdle's server as a child process and exposes it over **MCP Streamable HTTP**, authenticated with **OAuth 2.1** so the hosted Claude surfaces can actually connect to it. Run it on the Mac next to Spark, tunnel it out, add the URL as a custom connector, done.
 
 ```
 Claude mobile / claude.ai
         │  HTTPS (Cloudflare Tunnel)
         ▼
-spark-mcp-remote  (this)          ← bearer auth, send/read-only gates
+spark-mcp-remote  (this)          ← OAuth 2.1 + DCR, send/read-only gates
         │  stdio
         ▼
 readdle/spark-claude-extension    ← official, vendored, unmodified
@@ -42,11 +42,14 @@ Check it:
 
 ```bash
 curl -s localhost:8787/healthz
-curl -s -H "Authorization: Bearer $(grep TOKEN .env | cut -d= -f2)" \
-  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}' \
-  localhost:8787/mcp
+# /mcp is OAuth-protected: unauthenticated requests must 401 and point at the
+# metadata that starts the handshake.
+curl -si -X POST localhost:8787/mcp | grep -i 'HTTP/\|www-authenticate'
 ```
+
+There is no way to hand-craft a bearer for `/mcp` — a token has to be issued
+through the OAuth flow. `npm test` drives that flow end to end if you want to
+see it work locally.
 
 ## Expose it (Cloudflare Tunnel)
 
@@ -100,7 +103,7 @@ The token is the only local secret. It stays in `~/.cloudflared/spark-mcp.token`
 and reaches cloudflared through `TUNNEL_TOKEN`, so it is in neither the
 world-readable supervisor `.ini` nor the argv `ps` shows.
 
-Optional: add a Cloudflare Access service-token policy on the hostname for a second factor beyond the bearer token.
+Optional: add a Cloudflare Access policy on the hostname for a second factor in front of OAuth.
 
 ## Add to Claude
 
@@ -111,40 +114,40 @@ Leave the OAuth Client ID/Secret fields empty. Claude discovers the bridge's own
 authorization server, registers itself, and opens a consent screen; paste the
 `SPARK_MCP_TOKEN` from `.env` there and it connects. It shows up on mobile too.
 
-**Why OAuth.** The hosted Claude surfaces authenticate a connector over OAuth —
-the connector dialog has no field for a static bearer token (`static_headers` is
-beta and organization-admin only). A server that only checks a shared secret is
-reachable from curl and Claude Code but *not* from Claude.ai or mobile, which is
-the entire point of this bridge. So the bridge is also a small OAuth 2.1
-authorization server (`src/oauth.js`): RFC 7591 dynamic client registration, S256
-PKCE, RFC 9728 protected-resource metadata, rotating refresh tokens. There is one
-user and no user database — `SPARK_MCP_TOKEN` is the credential the consent
-screen checks, and it doubles as the HMAC key that signs every issued token, so
-rotating it revokes everything.
-
-Endpoints it adds: `/.well-known/oauth-protected-resource`,
-`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`,
-`/oauth/token`.
-
-Clients that *can* send a header skip all of that — the raw `SPARK_MCP_TOKEN`
-still works as a plain bearer:
+Claude Code uses the same flow — no header, no token argument:
 
 ```bash
-# Claude Code
-claude mcp add --transport http spark-mcp https://spark-mcp.example.com/mcp \
-  --header "Authorization: Bearer $(grep TOKEN .env | cut -d= -f2)"
-```
-
-For Claude Desktop, bridge it with `mcp-remote` (note: no space after
-`Authorization:` — mcp-remote splits the argument on whitespace):
-
-```json
-{ "mcpServers": { "spark-mcp": { "command": "npx", "args": [
-  "-y", "mcp-remote", "https://spark-mcp.example.com/mcp",
-  "--header", "Authorization:Bearer YOUR_TOKEN" ] } } }
+claude mcp add --transport http spark-mcp https://spark-mcp.example.com/mcp
+# then `/mcp` in a session to run the OAuth flow
 ```
 
 Install `Spark.skill` from the Readdle releases page for the full workflow guidance.
+
+### Why OAuth
+
+The hosted Claude surfaces authenticate a connector over OAuth. The connector
+dialog has no field for a static bearer token — `static_headers` exists only as
+an organization-admin beta — so a server that just checks a shared secret is
+reachable from curl and unreachable from Claude.ai and mobile, which is the
+entire point of this bridge.
+
+So the bridge is also its own OAuth 2.1 authorization server (`src/oauth.js`):
+RFC 9728 protected-resource metadata, RFC 8414 server metadata, RFC 7591 dynamic
+client registration, S256 PKCE, audience-bound access tokens and rotating
+refresh tokens. It adds `/.well-known/oauth-protected-resource`,
+`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`
+and `/oauth/token`.
+
+There is one user and no user database. `SPARK_MCP_TOKEN` is the credential the
+consent screen checks, and it doubles as the HMAC key signing every `client_id`,
+authorization code and token — so the server holds no session state (supervisord
+restarts it on every deploy without logging Claude out) and rotating the secret
+revokes everything at once.
+
+`SPARK_MCP_TOKEN` is **not** accepted as a bearer token on `/mcp`. Only tokens
+the server issued are, which keeps the long-lived secret off the wire: what
+travels on each request is a short-lived, audience-bound token that expires in an
+hour.
 
 ## Keep it running (macOS)
 
@@ -166,7 +169,7 @@ brew services start supervisor       # user-level launchd agent, survives reboot
 supervisorctl status
 ```
 
-UI is at `http://127.0.0.1:9001`. Keep it on loopback (or a Tailscale IP if you run Tailscale) — never `0.0.0.0`. The bearer token protects `/mcp`, but the supervisor UI can restart things and read logs.
+UI is at `http://127.0.0.1:9001`. Keep it on loopback (or a Tailscale IP if you run Tailscale) — never `0.0.0.0`. OAuth protects `/mcp`, but the supervisor UI can restart things and read logs.
 
 Intel Macs: replace `/opt/homebrew` with `/usr/local` in the ini files.
 
@@ -184,11 +187,12 @@ The bridge respawns the upstream process if it dies (e.g. Spark restarted).
 
 | Env | Default | Effect |
 |---|---|---|
-| `SPARK_MCP_TOKEN` | required | Bearer token, ≥ 24 chars |
+| `SPARK_MCP_TOKEN` | required | Consent-screen credential and token signing key, ≥ 24 chars. Not a bearer token — rotating it revokes every issued token. |
 | `SPARK_MCP_READ_ONLY=1` | off | Hides and blocks `draft`, `comment`, `action`, `contact-action`, `event` |
 | `SPARK_MCP_ALLOW_SEND=1` | off | Enables the `event` tool and `action` `send`/`unschedule`. Off by default so a leaked token can't send mail. |
 | `SPARK_MCP_ENTRY` | `vendor/…/server/index.js` | Point at a different upstream (e.g. the extracted `Spark.mcpb`) |
 | `SPARK_PATH` | upstream default | Passed through to Readdle's server |
+| `SPARK_MCP_PUBLIC_URL` | derived from `X-Forwarded-*` | Pin the external origin used in OAuth metadata when the proxy does not set forwarding headers |
 
 Spark's own per-account access levels (read-only / triage / send in **Settings → AI Agents**) still apply underneath. This bridge only ever narrows, never widens.
 

@@ -1,9 +1,11 @@
 // Boots the bridge against test/fake-upstream.js and exercises auth, tools/list and the send gate.
+// Auth is OAuth-only, so the client obtains a real access token first.
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import assert from "node:assert/strict";
+import { getAccessToken } from "./oauth-client.js";
 
 const TOKEN = "test-token-test-token-test-token";
 const PORT = 8799;
@@ -17,7 +19,14 @@ try {
   const unauth = await fetch(`http://127.0.0.1:${PORT}/mcp`, { method: "POST", body: "{}" });
   assert.equal(unauth.status, 401, "unauthenticated requests must be rejected");
 
-  const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } });
+  // The shared secret is not a bearer credential — it only authorizes consent.
+  const raw = await fetch(`http://127.0.0.1:${PORT}/mcp`, {
+    method: "POST", headers: { Authorization: `Bearer ${TOKEN}` }, body: "{}"
+  });
+  assert.equal(raw.status, 401, "SPARK_MCP_TOKEN must not authenticate directly");
+
+  const { access_token } = await getAccessToken(`http://127.0.0.1:${PORT}`, TOKEN);
+  const t = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${access_token}` } } });
   const c = new Client({ name: "smoke", version: "0" });
   await c.connect(t);
   const { tools } = await c.listTools();

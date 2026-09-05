@@ -147,13 +147,19 @@ try {
   });
   assert.equal((await deadRefresh.json()).error, "invalid_grant", "dead refresh must be invalid_grant");
 
-  // 9. the static shared secret still works (Claude Code / curl / mcp-remote)
+  // 9. the shared secret is NOT a bearer credential — only issued tokens are
   const staticAuth = await fetch(`${BASE}/mcp`, {
     method: "POST",
     headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } })
   });
-  assert.equal(staticAuth.status, 200, "static bearer must keep working");
+  assert.equal(staticAuth.status, 401, "SPARK_MCP_TOKEN must not authenticate directly");
+
+  // 10. a refresh-typed token must not be usable as an access token
+  const wrongType = await fetch(`${BASE}/mcp`, {
+    method: "POST", headers: { authorization: `Bearer ${tok.refresh_token}`, "content-type": "application/json" }, body: "{}"
+  });
+  assert.equal(wrongType.status, 401, "refresh token must not work as an access token");
 
   console.log("oauth: all checks passed");
 } finally { proc.kill("SIGTERM"); }
