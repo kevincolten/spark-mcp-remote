@@ -19,7 +19,7 @@
  */
 
 import { createServer as createHttpServer } from "node:http";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+
+import { createOAuth, originOf } from "./oauth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +42,9 @@ const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || "127.0.0.1"; // bind loopback; let the tunnel do ingress
 const MCP_PATH = process.env.MCP_PATH || "/mcp";
 const TOKEN = process.env.SPARK_MCP_TOKEN;
+// Pin the externally-visible origin when the proxy does not set X-Forwarded-*.
+// Normally cloudflared does, and originOf() derives it per request.
+const PUBLIC_URL = process.env.SPARK_MCP_PUBLIC_URL;
 
 // Path to the upstream stdio server. Default: vendored clone (see scripts/setup.sh).
 // Can also point at the extracted Spark.mcpb from Claude Desktop, e.g.
@@ -191,13 +196,16 @@ function buildDownstream() {
 
 const sessions = new Map(); // sessionId -> { transport, server }
 
-function authorized(req) {
+// Claude.ai can only authenticate a connector over OAuth, so the bridge is its
+// own authorization server (see src/oauth.js). The raw SPARK_MCP_TOKEN still
+// works as a bearer for curl / Claude Code / mcp-remote.
+const oauth = createOAuth({ secret: TOKEN, mcpPath: MCP_PATH, publicUrl: PUBLIC_URL });
+
+function authorized(req, origin) {
     const header = req.headers.authorization || "";
     const m = /^Bearer\s+(.+)$/i.exec(header);
     if (!m) return false;
-    const a = Buffer.from(m[1]);
-    const b = Buffer.from(TOKEN);
-    return a.length === b.length && timingSafeEqual(a, b);
+    return !!oauth.verifyAccess(m[1], origin);
 }
 
 async function readJsonBody(req) {
@@ -209,6 +217,20 @@ async function readJsonBody(req) {
 
 const httpServer = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    const origin = originOf(req, PUBLIC_URL);
+
+    // Discovery + OAuth endpoints. Returns false when the path is not one of
+    // them, so the MCP transport below still sees everything else.
+    try {
+        if ((await oauth.handle(req, res, url, origin)) !== false) return;
+    } catch (err) {
+        console.error(`[spark-mcp-remote] oauth error: ${err.stack || err}`);
+        if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "server_error" }));
+        }
+        return;
+    }
 
     if (url.pathname === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -221,8 +243,14 @@ const httpServer = createHttpServer(async (req, res) => {
         return;
     }
 
-    if (!authorized(req)) {
-        res.writeHead(401, { "www-authenticate": 'Bearer realm="spark-mcp-remote"' }).end();
+    if (!authorized(req, origin)) {
+        // The resource_metadata pointer is what lets Claude discover the
+        // authorization server (RFC 9728 §5.1). Claude ignores this header on a
+        // 200, so it has to ride on the 401.
+        res.writeHead(401, {
+            "www-authenticate":
+                `Bearer realm="spark-mcp-remote", resource_metadata="${oauth.metadataUrl(origin)}"`
+        }).end();
         return;
     }
 

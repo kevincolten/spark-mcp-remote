@@ -4,7 +4,7 @@
   "description": "Expose the official Spark (Readdle) stdio MCP server over Streamable HTTP with bearer auth, so Claude mobile/web can reach your Spark Desktop mailbox",
   "main": "src/server.js",
   "scripts": {
-    "test": "node test/smoke.js",
+    "test": "node test/smoke.js && node test/oauth.js",
     "start": "node --env-file-if-exists=.env src/server.js",
     "setup": "bash scripts/setup.sh"
   },

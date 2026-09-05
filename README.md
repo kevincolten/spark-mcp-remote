@@ -104,12 +104,47 @@ Optional: add a Cloudflare Access service-token policy on the hostname for a sec
 
 ## Add to Claude
 
-Claude.ai → Settings → Connectors → Add custom connector
+Claude.ai → Settings → Connectors → Add custom connector → URL
+`https://spark-mcp.example.com/mcp`
 
-- URL: `https://spark-mcp.example.com/mcp`
-- Auth: the bearer token from `.env`
+Leave the OAuth Client ID/Secret fields empty. Claude discovers the bridge's own
+authorization server, registers itself, and opens a consent screen; paste the
+`SPARK_MCP_TOKEN` from `.env` there and it connects. It shows up on mobile too.
 
-It shows up on mobile too. Install `Spark.skill` from the Readdle releases page for the full workflow guidance.
+**Why OAuth.** The hosted Claude surfaces authenticate a connector over OAuth —
+the connector dialog has no field for a static bearer token (`static_headers` is
+beta and organization-admin only). A server that only checks a shared secret is
+reachable from curl and Claude Code but *not* from Claude.ai or mobile, which is
+the entire point of this bridge. So the bridge is also a small OAuth 2.1
+authorization server (`src/oauth.js`): RFC 7591 dynamic client registration, S256
+PKCE, RFC 9728 protected-resource metadata, rotating refresh tokens. There is one
+user and no user database — `SPARK_MCP_TOKEN` is the credential the consent
+screen checks, and it doubles as the HMAC key that signs every issued token, so
+rotating it revokes everything.
+
+Endpoints it adds: `/.well-known/oauth-protected-resource`,
+`/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`,
+`/oauth/token`.
+
+Clients that *can* send a header skip all of that — the raw `SPARK_MCP_TOKEN`
+still works as a plain bearer:
+
+```bash
+# Claude Code
+claude mcp add --transport http spark-mcp https://spark-mcp.example.com/mcp \
+  --header "Authorization: Bearer $(grep TOKEN .env | cut -d= -f2)"
+```
+
+For Claude Desktop, bridge it with `mcp-remote` (note: no space after
+`Authorization:` — mcp-remote splits the argument on whitespace):
+
+```json
+{ "mcpServers": { "spark-mcp": { "command": "npx", "args": [
+  "-y", "mcp-remote", "https://spark-mcp.example.com/mcp",
+  "--header", "Authorization:Bearer YOUR_TOKEN" ] } } }
+```
+
+Install `Spark.skill` from the Readdle releases page for the full workflow guidance.
 
 ## Keep it running (macOS)
 
@@ -162,7 +197,9 @@ Calls are tagged `AI_AGENT=claude-remote` in Spark's audit log so you can tell r
 ## Test
 
 ```bash
-npm test   # boots the bridge against a fake stdio upstream; checks auth, tool listing, send gate
+npm test   # boots the bridge against a fake stdio upstream; checks auth, tool
+           # listing, send gate, and the full OAuth flow (discovery, DCR, PKCE,
+           # code replay, audience binding, refresh rotation)
 ```
 
 ## License
