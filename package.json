@@ -1,0 +1,33 @@
+{
+  "name": "spark-mcp-remote",
+  "version": "0.1.0",
+  "description": "Expose the official Spark (Readdle) stdio MCP server over Streamable HTTP with bearer auth, so Claude mobile/web can reach your Spark Desktop mailbox",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "node test/smoke.js",
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "setup": "bash scripts/setup.sh"
+  },
+  "keywords": [
+    "spark",
+    "mcp",
+    "email",
+    "claude"
+  ],
+  "author": "Kevin Colten",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "spark-mcp-remote": "src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kevincolten/spark-mcp-remote.git"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}
