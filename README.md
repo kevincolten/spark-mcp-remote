@@ -8,7 +8,7 @@ This is a ~200-line bridge that spawns Readdle's server as a child process and e
 
 ```
 Claude mobile / claude.ai
-        │  HTTPS (Cloudflare Tunnel / Tailscale Funnel)
+        │  HTTPS (Cloudflare Tunnel)
         ▼
 spark-mcp-remote  (this)          ← bearer auth, send/read-only gates
         │  stdio
@@ -26,7 +26,7 @@ It proxies at the MCP level (`tools/list`, `tools/call`), so upstream tool chang
 - macOS or Windows with Spark Desktop signed in
 - Spark CLI enabled: **Spark → Settings → AI Agents → Spark CLI Setup**
 - Node ≥ 20.6 (for `--env-file`)
-- Some way to expose a local port over HTTPS (Cloudflare Tunnel recommended)
+- A domain on Cloudflare (free plan is fine) for the tunnel
 
 ## Install
 
@@ -48,22 +48,36 @@ curl -s -H "Authorization: Bearer $(grep TOKEN .env | cut -d= -f2)" \
   localhost:8787/mcp
 ```
 
-## Expose it
+## Expose it (Cloudflare Tunnel)
 
-The server binds `127.0.0.1` on purpose. Put the tunnel in front:
+The server binds `127.0.0.1` on purpose; cloudflared handles ingress and TLS.
 
-**Cloudflare Tunnel**
 ```bash
-cloudflared tunnel create spark-mcp
+brew install cloudflared
+cloudflared tunnel login                                   # opens browser, pick your zone
+cloudflared tunnel create spark-mcp                        # prints a tunnel UUID, writes ~/.cloudflared/<uuid>.json
 cloudflared tunnel route dns spark-mcp spark-mcp.example.com
-cloudflared tunnel run --url http://127.0.0.1:8787 spark-mcp
 ```
-Consider adding a Cloudflare Access policy on top of the bearer token.
 
-**Tailscale Funnel**
-```bash
-tailscale funnel 8787
+Create `~/.cloudflared/config.yml`:
+
+```yaml
+tunnel: spark-mcp
+credentials-file: /Users/YOU/.cloudflared/<uuid>.json
+ingress:
+  - hostname: spark-mcp.example.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404
 ```
+
+Test it in the foreground, then hand it to supervisord (below):
+
+```bash
+cloudflared tunnel run spark-mcp
+curl -s https://spark-mcp.example.com/healthz
+```
+
+Optional: add a Cloudflare Access service-token policy on the hostname for a second factor beyond the bearer token.
 
 ## Add to Claude
 
@@ -92,7 +106,7 @@ brew services start supervisor       # user-level launchd agent, survives reboot
 supervisorctl status
 ```
 
-UI is at `http://<tailscale-ip>:9001`. Bind it to your Tailscale IP, not `0.0.0.0`; the bearer token protects `/mcp`, but the supervisor UI can restart things and read logs.
+UI is at `http://127.0.0.1:9001`. Keep it on loopback (or a Tailscale IP if you run Tailscale) — never `0.0.0.0`. The bearer token protects `/mcp`, but the supervisor UI can restart things and read logs.
 
 Intel Macs: replace `/opt/homebrew` with `/usr/local` in the ini files.
 
