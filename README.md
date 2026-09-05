@@ -52,30 +52,53 @@ curl -s -H "Authorization: Bearer $(grep TOKEN .env | cut -d= -f2)" \
 
 The server binds `127.0.0.1` on purpose; cloudflared handles ingress and TLS.
 
+Use a **remotely-managed** tunnel: the ingress rules live in Cloudflare, not in a
+local `config.yml`, so there is nothing to keep in sync on the Mac and no
+`cert.pem` to obtain — which also means no `cloudflared tunnel login` and no
+browser. An API token with *Cloudflare Tunnel: Edit*, *DNS: Edit* on the zone and
+*Account Settings: Read* is enough.
+
 ```bash
 brew install cloudflared
-cloudflared tunnel login                                   # opens browser, pick your zone
-cloudflared tunnel create spark-mcp                        # prints a tunnel UUID, writes ~/.cloudflared/<uuid>.json
-cloudflared tunnel route dns spark-mcp spark-mcp.example.com
-```
+export CLOUDFLARE_API_TOKEN=...   ACCOUNT=<account id>   ZONE=<zone id>
+API=https://api.cloudflare.com/client/v4
+auth="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
 
-Create `~/.cloudflared/config.yml`:
+# 1. create the tunnel (config_src=cloudflare => remotely managed)
+TUNNEL=$(curl -s -X POST -H "$auth" -H 'content-type: application/json' \
+  --data '{"name":"spark-mcp","config_src":"cloudflare"}' \
+  "$API/accounts/$ACCOUNT/cfd_tunnel" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["id"])')
 
-```yaml
-tunnel: spark-mcp
-credentials-file: /Users/YOU/.cloudflared/<uuid>.json
-ingress:
-  - hostname: spark-mcp.example.com
-    service: http://127.0.0.1:8787
-  - service: http_status:404
+# 2. ingress: the hostname, then a catch-all
+curl -s -X PUT -H "$auth" -H 'content-type: application/json' \
+  --data '{"config":{"ingress":[
+      {"hostname":"spark-mcp.example.com","service":"http://127.0.0.1:8787"},
+      {"service":"http_status:404"}]}}' \
+  "$API/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/configurations"
+
+# 3. proxied CNAME
+curl -s -X POST -H "$auth" -H 'content-type: application/json' \
+  --data "{\"type\":\"CNAME\",\"name\":\"spark-mcp\",\"content\":\"$TUNNEL.cfargotunnel.com\",\"proxied\":true}" \
+  "$API/zones/$ZONE/dns_records"
+
+# 4. run token -> chmod-600 file the supervisor wrapper reads
+mkdir -p ~/.cloudflared
+curl -s -H "$auth" "$API/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/token" \
+  | python3 -c 'import sys,json;sys.stdout.write(json.load(sys.stdin)["result"])' \
+  > ~/.cloudflared/spark-mcp.token
+chmod 600 ~/.cloudflared/spark-mcp.token
 ```
 
 Test it in the foreground, then hand it to supervisord (below):
 
 ```bash
-cloudflared tunnel run spark-mcp
+supervisor/run-tunnel.sh
 curl -s https://spark-mcp.example.com/healthz
 ```
+
+The token is the only local secret. It stays in `~/.cloudflared/spark-mcp.token`
+and reaches cloudflared through `TUNNEL_TOKEN`, so it is in neither the
+world-readable supervisor `.ini` nor the argv `ps` shows.
 
 Optional: add a Cloudflare Access service-token policy on the hostname for a second factor beyond the bearer token.
 
@@ -99,8 +122,10 @@ Gives you a local start/stop/restart/tail-logs dashboard for this and any other 
 ```bash
 brew install supervisor
 mkdir -p $(brew --prefix)/etc/supervisor.d
-cp supervisor/spark-mcp-remote.ini supervisor/cloudflared.ini $(brew --prefix)/etc/supervisor.d/
-# edit YOU / paths in both .ini files
+for ini in spark-mcp-remote cloudflared-spark; do
+  sed "s#/Users/YOU#$HOME#g; s#^user=YOU\$#user=$(whoami)#" "supervisor/$ini.ini" \
+    > "$(brew --prefix)/etc/supervisor.d/$ini.ini"
+done
 # merge supervisor/supervisord.conf into $(brew --prefix)/etc/supervisord.conf (inet_http_server + include)
 brew services start supervisor       # user-level launchd agent, survives reboots
 supervisorctl status
