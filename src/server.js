@@ -6,12 +6,12 @@
  * a stdio server that shells out to the Spark CLI) and exposes it over MCP
  * Streamable HTTP, authenticated with OAuth 2.1 (see src/oauth.js).
  *
- * Runs on the same Mac/PC as Spark Desktop. Put it behind a Cloudflare Tunnel or
- * Tailscale Funnel and add the URL as a custom connector in Claude.ai / Claude
- * mobile.
+ * Runs on the same Mac/PC as Spark Desktop. HOST picks the bind address: the
+ * default is loopback, and setting it to this machine's Tailscale IP serves the
+ * whole tailnet, so any device on it can add the URL as an MCP server.
  *
  * Architecture:
- *   Claude (remote) --HTTP--> [this server] --stdio--> readdle server/index.js --exec--> spark CLI --> Spark Desktop
+ *   Claude (tailnet) --HTTP--> [this server] --stdio--> readdle server/index.js --exec--> spark CLI --> Spark Desktop
  *
  * We proxy at the MCP protocol level (tools/list + tools/call) rather than
  * re-implementing the CLI mapping, so upstream tool changes flow through
@@ -39,11 +39,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8787;
-const HOST = process.env.HOST || "127.0.0.1"; // bind loopback; let the tunnel do ingress
+// Bind address. Loopback by default; set it to a Tailscale IP (tailscale ip -4)
+// or a MagicDNS name to reach the bridge from other devices on the tailnet.
+// 0.0.0.0 would put an OAuth server on every network the machine joins — don't.
+const HOST = process.env.HOST || "127.0.0.1";
 const MCP_PATH = process.env.MCP_PATH || "/mcp";
 const TOKEN = process.env.SPARK_MCP_TOKEN;
-// Pin the externally-visible origin when the proxy does not set X-Forwarded-*.
-// Normally cloudflared does, and originOf() derives it per request.
+// Pin the externally-visible origin. Only needed behind a reverse proxy that
+// does not set X-Forwarded-*; served directly, originOf() derives it per request
+// from the Host header the client used.
 const PUBLIC_URL = process.env.SPARK_MCP_PUBLIC_URL;
 
 // Path to the upstream stdio server. Default: vendored clone (see scripts/setup.sh).
@@ -294,12 +298,29 @@ const httpServer = createHttpServer(async (req, res) => {
     }
 });
 
-httpServer.listen(PORT, HOST, () => {
+// A Tailscale IP only exists once tailscaled has brought the interface up, which
+// can be after we start at login. Retry instead of dying so the process manager
+// does not have to burn its restart budget on a race it cannot see.
+const BIND_RETRY_MS = 3000;
+
+httpServer.on("error", err => {
+    if (err.code !== "EADDRNOTAVAIL") throw err;
     console.error(
-        `[spark-mcp-remote] listening on http://${HOST}:${PORT}${MCP_PATH}` +
-            ` (read-only=${READ_ONLY}, allow-send=${ALLOW_SEND})`
+        `[spark-mcp-remote] ${HOST} not available yet (tailscaled still coming up?); retrying in ${BIND_RETRY_MS}ms`
     );
+    setTimeout(listen, BIND_RETRY_MS).unref();
 });
+
+function listen() {
+    httpServer.listen(PORT, HOST, () => {
+        console.error(
+            `[spark-mcp-remote] listening on http://${HOST}:${PORT}${MCP_PATH}` +
+                ` (read-only=${READ_ONLY}, allow-send=${ALLOW_SEND})`
+        );
+    });
+}
+
+listen();
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
     process.on(sig, async () => {

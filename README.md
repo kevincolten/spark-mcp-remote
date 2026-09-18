@@ -1,14 +1,14 @@
 # spark-mcp-remote
 
-Reach your [Spark](https://sparkmailapp.com) mailbox from Claude on your phone / claude.ai.
+Reach your [Spark](https://sparkmailapp.com) mailbox from any Claude client on your tailnet.
 
-Spark's official [Spark for Claude](https://github.com/readdle/spark-claude-extension) is a **stdio** MCP server that shells out to the Spark CLI, which only exists where Spark Desktop is running (macOS/Windows). That's fine for Claude Desktop, invisible to Claude mobile and claude.ai.
+Spark's official [Spark for Claude](https://github.com/readdle/spark-claude-extension) is a **stdio** MCP server that shells out to the Spark CLI, which only exists where Spark Desktop is running (macOS/Windows). That's fine on that one machine, useless from anywhere else.
 
-This is a small bridge that spawns Readdle's server as a child process and exposes it over **MCP Streamable HTTP**, authenticated with **OAuth 2.1** so the hosted Claude surfaces can actually connect to it. Run it on the Mac next to Spark, tunnel it out, add the URL as a custom connector, done.
+This is a small bridge that spawns Readdle's server as a child process and exposes it over **MCP Streamable HTTP**, authenticated with **OAuth 2.1**. Run it on the Mac next to Spark, bind it to that Mac's Tailscale address, and every other device on your tailnet can add the URL as an MCP server. No tunnel, no public hostname, no TLS certificate.
 
 ```
-Claude mobile / claude.ai
-        │  HTTPS (Cloudflare Tunnel)
+Claude Code / Claude Desktop, any tailnet device
+        │  HTTP over WireGuard (Tailscale)
         ▼
 spark-mcp-remote  (this)          ← OAuth 2.1 + DCR, send/read-only gates
         │  stdio
@@ -26,7 +26,7 @@ It proxies at the MCP level (`tools/list`, `tools/call`), so upstream tool chang
 - macOS or Windows with Spark Desktop signed in
 - Spark CLI enabled: **Spark → Settings → AI Agents → Spark CLI Setup**
 - Node ≥ 20.6 (for `--env-file`)
-- A domain on Cloudflare (free plan is fine) for the tunnel
+- [Tailscale](https://tailscale.com) on this Mac and on whatever you connect from
 
 ## Install
 
@@ -51,85 +51,79 @@ There is no way to hand-craft a bearer for `/mcp` — a token has to be issued
 through the OAuth flow. `npm test` drives that flow end to end if you want to
 see it work locally.
 
-## Expose it (Cloudflare Tunnel)
+## Expose it (Tailscale)
 
-The server binds `127.0.0.1` on purpose; cloudflared handles ingress and TLS.
-
-Use a **remotely-managed** tunnel: the ingress rules live in Cloudflare, not in a
-local `config.yml`, so there is nothing to keep in sync on the Mac and no
-`cert.pem` to obtain — which also means no `cloudflared tunnel login` and no
-browser. An API token with *Cloudflare Tunnel: Edit*, *DNS: Edit* on the zone and
-*Account Settings: Read* is enough.
+There is no tunnel and no ingress to configure. Bind the listener to this Mac's
+Tailscale address and the tailnet is the network boundary: WireGuard does the
+encryption, and only devices you have authorised can route to it at all.
 
 ```bash
-brew install cloudflared
-export CLOUDFLARE_API_TOKEN=...   ACCOUNT=<account id>   ZONE=<zone id>
-API=https://api.cloudflare.com/client/v4
-auth="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-
-# 1. create the tunnel (config_src=cloudflare => remotely managed)
-TUNNEL=$(curl -s -X POST -H "$auth" -H 'content-type: application/json' \
-  --data '{"name":"spark-mcp","config_src":"cloudflare"}' \
-  "$API/accounts/$ACCOUNT/cfd_tunnel" | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["id"])')
-
-# 2. ingress: the hostname, then a catch-all
-curl -s -X PUT -H "$auth" -H 'content-type: application/json' \
-  --data '{"config":{"ingress":[
-      {"hostname":"spark-mcp.example.com","service":"http://127.0.0.1:8787"},
-      {"service":"http_status:404"}]}}' \
-  "$API/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/configurations"
-
-# 3. proxied CNAME
-curl -s -X POST -H "$auth" -H 'content-type: application/json' \
-  --data "{\"type\":\"CNAME\",\"name\":\"spark-mcp\",\"content\":\"$TUNNEL.cfargotunnel.com\",\"proxied\":true}" \
-  "$API/zones/$ZONE/dns_records"
-
-# 4. run token -> chmod-600 file the supervisor wrapper reads
-mkdir -p ~/.cloudflared
-curl -s -H "$auth" "$API/accounts/$ACCOUNT/cfd_tunnel/$TUNNEL/token" \
-  | python3 -c 'import sys,json;sys.stdout.write(json.load(sys.stdin)["result"])' \
-  > ~/.cloudflared/spark-mcp.token
-chmod 600 ~/.cloudflared/spark-mcp.token
+tailscale ip -4                 # e.g. 100.87.225.42
+tailscale status --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["Self"]["DNSName"])'
 ```
 
-Test it in the foreground, then hand it to supervisord (below):
+Put the address in `.env` and restart:
 
 ```bash
-supervisor/run-tunnel.sh
-curl -s https://spark-mcp.example.com/healthz
+HOST=100.87.225.42              # or the MagicDNS name; never 0.0.0.0
 ```
 
-The token is the only local secret. It stays in `~/.cloudflared/spark-mcp.token`
-and reaches cloudflared through `TUNNEL_TOKEN`, so it is in neither the
-world-readable supervisor `.ini` nor the argv `ps` shows.
+From another device on the tailnet:
 
-Optional: add a Cloudflare Access policy on the hostname for a second factor in front of OAuth.
+```bash
+curl -s http://your-mac.your-tailnet.ts.net:8787/healthz
+```
+
+`HOST` is the only knob — anything the machine can bind works, so the same
+server runs loopback-only during development and tailnet-wide in production
+without a second process in front of it.
+
+Two things worth knowing about this trade:
+
+- **The hosted Claude surfaces can't reach it.** claude.ai and the Claude mobile
+  app fetch custom connectors from Anthropic's servers, not from your device, so
+  a tailnet address is unreachable to them. What works is a client running on a
+  tailnet device: Claude Code, Claude Desktop.
+- **It is plain HTTP.** That is fine here — the transport is already encrypted
+  and authenticated by WireGuard, and OAuth still gates `/mcp`. If a client
+  insists on TLS, `tailscale serve --bg --https=443 http://127.0.0.1:8787` puts a
+  real `ts.net` certificate in front (tailnet-only), and `tailscale funnel` does
+  the same thing publicly if you ever do want claude.ai back.
 
 ## Add to Claude
 
-Claude.ai → Settings → Connectors → Add custom connector → URL
-`https://spark-mcp.example.com/mcp`
-
-Leave the OAuth Client ID/Secret fields empty. Claude discovers the bridge's own
-authorization server, registers itself, and opens a consent screen; paste the
-`SPARK_MCP_TOKEN` from `.env` there and it connects. It shows up on mobile too.
-
-Claude Code uses the same flow — no header, no token argument:
+From any device on the tailnet — no header, no token argument:
 
 ```bash
-claude mcp add --transport http spark-mcp https://spark-mcp.example.com/mcp
+claude mcp add --transport http spark http://your-mac.your-tailnet.ts.net:8787/mcp
 # then `/mcp` in a session to run the OAuth flow
 ```
+
+Claude discovers the bridge's own authorization server, registers itself, and
+opens a consent screen; paste the `SPARK_MCP_TOKEN` from `.env` there and it
+connects. The callback lands on `http://localhost:<port>/callback` in the browser
+on that same device, so nothing has to route back to the Mac.
+
+Claude Desktop's custom connector dialog takes the same URL. If it refuses a
+plain-`http` one, front the bridge with `tailscale serve` (above) and give it the
+`https://` form instead.
 
 Install `Spark.skill` from the Readdle releases page for the full workflow guidance.
 
 ### Why OAuth
 
-The hosted Claude surfaces authenticate a connector over OAuth. The connector
-dialog has no field for a static bearer token — `static_headers` exists only as
-an organization-admin beta — so a server that just checks a shared secret is
-reachable from curl and unreachable from Claude.ai and mobile, which is the
-entire point of this bridge.
+Nothing on a tailnet requires it — so this is deliberate. `/mcp` can hand a model
+your entire mailbox, and the tailnet is a flat network: every device on it, and
+every process and user on this Mac, can reach the port. A shared secret in a
+client config is the kind of thing that ends up in a dotfile repo; what travels
+here instead is a short-lived, audience-bound token, and the long-lived secret
+never goes on the wire at all.
+
+It also means the exposure decision stays reversible. Put a `tailscale funnel` in
+front and the bridge is a working claude.ai custom connector with no code change,
+because OAuth is the only authentication the hosted Claude surfaces accept — their
+connector dialog has no static-token field (`static_headers` is an
+organization-admin beta).
 
 So the bridge is also its own OAuth 2.1 authorization server (`src/oauth.js`):
 RFC 9728 protected-resource metadata, RFC 8414 server metadata, RFC 7591 dynamic
@@ -160,16 +154,18 @@ Gives you a local start/stop/restart/tail-logs dashboard for this and any other 
 ```bash
 brew install supervisor
 mkdir -p $(brew --prefix)/etc/supervisor.d
-for ini in spark-mcp-remote cloudflared-spark; do
-  sed "s#/Users/YOU#$HOME#g; s#^user=YOU\$#user=$(whoami)#" "supervisor/$ini.ini" \
-    > "$(brew --prefix)/etc/supervisor.d/$ini.ini"
-done
+sed "s#/Users/YOU#$HOME#g; s#^user=YOU\$#user=$(whoami)#" supervisor/spark-mcp-remote.ini \
+  > "$(brew --prefix)/etc/supervisor.d/spark-mcp-remote.ini"
 # merge supervisor/supervisord.conf into $(brew --prefix)/etc/supervisord.conf (inet_http_server + include)
 brew services start supervisor       # user-level launchd agent, survives reboots
 supervisorctl status
 ```
 
-UI is at `http://127.0.0.1:9001`. Keep it on loopback (or a Tailscale IP if you run Tailscale) — never `0.0.0.0`. OAuth protects `/mcp`, but the supervisor UI can restart things and read logs.
+UI is at `http://127.0.0.1:9001`. Keep it on loopback, or bind it to the Tailscale IP to reach it from your phone — never `0.0.0.0`. OAuth protects `/mcp`, but the supervisor UI can restart things and read logs.
+
+At login this can start before tailscaled has the interface up, so a `HOST` that
+is a Tailscale IP is not bindable yet. The server retries the bind instead of
+exiting, so there is nothing to order here.
 
 Intel Macs: replace `/opt/homebrew` with `/usr/local` in the ini files.
 
@@ -187,12 +183,14 @@ The bridge respawns the upstream process if it dies (e.g. Spark restarted).
 
 | Env | Default | Effect |
 |---|---|---|
+| `HOST` | `127.0.0.1` | Bind address. This Mac's Tailscale IP serves the tailnet; loopback serves only this machine. Never `0.0.0.0`. |
+| `PORT` | `8787` | Listening port |
 | `SPARK_MCP_TOKEN` | required | Consent-screen credential and token signing key, ≥ 24 chars. Not a bearer token — rotating it revokes every issued token. |
 | `SPARK_MCP_READ_ONLY=1` | off | Hides and blocks `draft`, `comment`, `action`, `contact-action`, `event` |
 | `SPARK_MCP_ALLOW_SEND=1` | off | Enables the `event` tool and `action` `send`/`unschedule`. Off by default so a leaked token can't send mail. |
 | `SPARK_MCP_ENTRY` | `vendor/…/server/index.js` | Point at a different upstream (e.g. the extracted `Spark.mcpb`) |
 | `SPARK_PATH` | upstream default | Passed through to Readdle's server |
-| `SPARK_MCP_PUBLIC_URL` | derived from `X-Forwarded-*` | Pin the external origin used in OAuth metadata when the proxy does not set forwarding headers |
+| `SPARK_MCP_PUBLIC_URL` | derived per request from `Host` / `X-Forwarded-*` | Pin the external origin used in OAuth metadata when clients reach the bridge by a name this server never sees |
 
 Spark's own per-account access levels (read-only / triage / send in **Settings → AI Agents**) still apply underneath. This bridge only ever narrows, never widens.
 

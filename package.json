@@ -1,7 +1,7 @@
 {
   "name": "spark-mcp-remote",
   "version": "0.1.0",
-  "description": "Reach your Spark mailbox from Claude mobile and claude.ai: bridges the official Spark (Readdle) stdio MCP server over Streamable HTTP with a built-in OAuth 2.1 authorization server, so it works as a custom connector",
+  "description": "Reach your Spark mailbox from any Claude client on your tailnet: bridges the official Spark (Readdle) stdio MCP server over Streamable HTTP with a built-in OAuth 2.1 authorization server",
   "main": "src/server.js",
   "scripts": {
     "test": "node test/smoke.js && node test/oauth.js",
@@ -14,7 +14,7 @@
     "email",
     "claude",
     "oauth",
-    "connector"
+    "tailscale"
   ],
   "author": "Kevin Colten",
   "license": "MIT",

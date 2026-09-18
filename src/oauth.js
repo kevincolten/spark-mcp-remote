@@ -82,10 +82,11 @@ function verify(secret, type, value) {
 // --- URLs ----------------------------------------------------------------
 
 /**
- * External origin of this server. Behind cloudflared the client-visible scheme
- * is https while we are listening on plain http, so trust X-Forwarded-Proto
- * (cloudflared always sets it) and fall back to the listening scheme.
- * SPARK_MCP_PUBLIC_URL overrides both when the deployment needs it pinned.
+ * External origin of this server, as the client sees it. Served directly on the
+ * tailnet, that is just Host + our scheme; behind a TLS-terminating proxy the
+ * client-visible scheme is https while we listen on plain http, so honour
+ * X-Forwarded-Proto/Host when they are set. SPARK_MCP_PUBLIC_URL overrides both
+ * when the deployment needs it pinned.
  */
 export function originOf(req, override) {
     if (override) return override.replace(/\/+$/, "");
